@@ -1,0 +1,9 @@
+data_*/
+debug_data/
+venv_tf/
+__pycache__/
+*.keras
+*.pkl
+*.csv
+.env
+.DS_Store
