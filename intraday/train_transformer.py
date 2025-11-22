@@ -25,17 +25,17 @@ SCALER_PATH = 'scaler_v6.pkl'
 MODEL_PATH = 'transformer_v6_balanced.keras'
 
 # Paramètres Temporels & Modèle
-SEQ_LEN = 60
+SEQ_LEN = 180
 EMBED_DIM = 64         # Suffisant pour capter les patterns
 NUM_HEADS = 4
-FF_DIM = 128
-NUM_LAYERS = 3         # 3 Couches = Le bon équilibre complexité/vitesse
-DROPOUT = 0.20
+FF_DIM = 64
+NUM_LAYERS = 2        # 2 Couches = Le bon équilibre complexité/vitesse
+DROPOUT = 0.40
 
 # Entraînement
 BATCH_SIZE = 2048      # Gros batch pour stabilité et vitesse
 EPOCHS = 50            
-LEARNING_RATE = 0.001  # Vitesse standard pour AdamW
+LEARNING_RATE = 0.0001  # Vitesse standard pour AdamW
 FUTURE_SPLIT_DATE = '2025-06-01'
 
 # CIBLE D'ÉQUILIBRAGE (Basé sur ton audit : le WAIT est le facteur limitant)
@@ -59,31 +59,56 @@ class PositionalEmbedding(layers.Layer):
         positions = tf.range(start=0, limit=length, delta=1)
         return inputs + self.position_embeddings(positions)
 
-class BalancedGenerator(utils.Sequence):
-    """Générateur qui prend les données déjà chargées en RAM"""
-    def __init__(self, X_data, y_data, indices, batch_size, seq_len):
-        self.X_data = X_data # Liste des arrays (un par fichier)
-        self.y_data = y_data # Liste des targets
-        self.indices = indices # Liste plate des tuples (file_idx, row_idx)
-        self.batch_size = batch_size
-        self.seq_len = seq_len
-
-    def __len__(self):
-        return int(np.floor(len(self.indices) / self.batch_size))
-
-    def __getitem__(self, index):
-        batch_idx = self.indices[index*self.batch_size : (index+1)*self.batch_size]
+def create_dataset(X_data, y_data, indices, batch_size, seq_len, shuffle=True):
+    """
+    Crée un pipeline tf.data haute performance.
+    """
+    # On mélange les indices une fois au début si demandé
+    if shuffle:
+        np.random.shuffle(indices)
         
-        # On prépare les conteneurs du batch
-        X_b = np.empty((self.batch_size, self.seq_len, self.X_data[0].shape[1]), dtype='float16')
-        y_b = np.empty((self.batch_size), dtype='int32')
-        
-        for i, (f_idx, r_idx) in enumerate(batch_idx):
-            # Extraction de la fenêtre glissante [t-60 : t]
-            X_b[i] = self.X_data[f_idx][r_idx-self.seq_len : r_idx]
-            y_b[i] = self.y_data[f_idx][r_idx-1]
-            
-        return X_b, y_b
+    # Nombre de features (40 dans ton cas, à vérifier dans len(features))
+    n_features = X_data[0].shape[1] 
+
+    def generator():
+        # Boucle infinie pour que le dataset ne s'épuise jamais (géré par steps_per_epoch)
+        while True:
+            # On remélange à chaque nouvelle passe complète
+            if shuffle:
+                np.random.shuffle(indices)
+                
+            for i in range(0, len(indices), batch_size):
+                batch_idx = indices[i : i + batch_size]
+                
+                # Si le dernier batch est incomplet, on le saute (plus stable pour le BatchNorm/Training)
+                if len(batch_idx) < batch_size:
+                    continue
+
+                # Allocations vides
+                X_b = np.empty((batch_size, seq_len, n_features), dtype='float16')
+                y_b = np.empty((batch_size), dtype='int32')
+                
+                # Remplissage (C'est la partie lente CPU)
+                for j, (f_idx, r_idx) in enumerate(batch_idx):
+                    X_b[j] = X_data[f_idx][r_idx-seq_len : r_idx]
+                    y_b[j] = y_data[f_idx][r_idx-1]
+                
+                yield X_b, y_b
+
+    # Définition de la structure des données pour TensorFlow
+    output_signature = (
+        tf.TensorSpec(shape=(batch_size, seq_len, n_features), dtype=tf.float16),
+        tf.TensorSpec(shape=(batch_size,), dtype=tf.int32)
+    )
+
+    # Création du Dataset
+    ds = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
+    
+    # 🚀 L'OPTIMISATION EST ICI :
+    # On demande au CPU de pré-charger 2 batchs d'avance en RAM pendant que le GPU bosse
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    
+    return ds
 
 # --- CHARGEMENT ET PRÉPARATION ---
 def load_and_balance_data(features):
@@ -221,8 +246,10 @@ def build_model_balanced(input_shape, n_classes):
     model.compile(
         optimizer=optimizers.AdamW(learning_rate=LEARNING_RATE, weight_decay=1e-4),
         loss="sparse_categorical_crossentropy", 
-        metrics=["accuracy"]
+        metrics=["accuracy"],
+        jit_compile=True
     )
+    print('📐 Modèle construit avec jit_compile=True')
     return model
 
 # --- MAIN LOOP ---
@@ -243,9 +270,15 @@ if __name__ == "__main__":
     
     print(f"📊 Train: {len(train_idx)} seq | Test: {len(test_idx)} seq")
     
-    # Générateurs
-    train_gen = BalancedGenerator(X_train, y_train, train_idx, BATCH_SIZE, SEQ_LEN)
-    test_gen = BalancedGenerator(X_test, y_test, test_idx, BATCH_SIZE, SEQ_LEN)
+    STEPS_PER_EPOCH = len(train_idx) // BATCH_SIZE
+    VALIDATION_STEPS = len(test_idx) // BATCH_SIZE
+    
+    # Astuce pour réduire la durée affichée de l'époque (Feedback rapide)
+    # On divise l'époque par 5
+    DISPLAY_STEPS = STEPS_PER_EPOCH // 5
+
+    train_ds = create_dataset(X_train, y_train, train_idx, BATCH_SIZE, SEQ_LEN, shuffle=True)
+    test_ds = create_dataset(X_test, y_test, test_idx, BATCH_SIZE, SEQ_LEN, shuffle=False)
 
     # Modèle
     model = build_model_balanced((SEQ_LEN, len(features)), 3)
@@ -256,16 +289,31 @@ if __name__ == "__main__":
         callbacks.ModelCheckpoint(MODEL_PATH, save_best_only=True, verbose=0)
     ]
 
-    print("\n🚀 GO TRAIN V6.3 (Balanced)...")
-    model.fit(train_gen, validation_data=test_gen, epochs=EPOCHS, callbacks=cbs)
+    class_weights = {
+    0: 1.2,  # Important
+    1: 0.8,  # Moins grave si on se trompe sur le Wait
+    2: 1.3   # TRÈS Important (On force le BUY)
+}
+
+    print(f"\n🚀 GO TRAIN V6.3 (tf.data optimized) - Steps: {DISPLAY_STEPS}")
+
+    model.fit(
+        train_ds, 
+        validation_data=test_ds, 
+        epochs=EPOCHS, 
+        callbacks=cbs, 
+        class_weight=class_weights,
+        steps_per_epoch=DISPLAY_STEPS,
+        validation_steps=VALIDATION_STEPS // 5,
+    )
     
     # Eval
     print("\n🔍 Audit Final...")
     model.load_weights(MODEL_PATH)
     
     all_preds, all_true = [], []
-    for i in tqdm(range(len(test_gen))):
-        X_b, y_b = test_gen[i]
+    for i in tqdm(range(len(test_ds))):
+        X_b, y_b = test_ds[i]
         p = model.predict_on_batch(X_b)
         all_preds.append(np.argmax(p, axis=1))
         all_true.append(y_b)
