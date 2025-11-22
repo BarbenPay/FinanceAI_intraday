@@ -7,9 +7,7 @@ from datetime import datetime, timedelta
 # --- CONFIGURATION ---
 
 TIINGO_API_KEYS = [
-    "716877d597ff16484eb9dfc3bb29cde6179d28f9",
-    "aa66adda66c984dbc116223c86310980c824cbea",
-    "ab9d7dd8e67e9a8daf810969b99855e6fab5e3df"
+    
 ]
 
 # Jusqu'où remonter ?
