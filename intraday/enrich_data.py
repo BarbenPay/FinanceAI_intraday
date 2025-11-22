@@ -5,22 +5,22 @@ import os
 import glob
 from tqdm import tqdm
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION V6.1 (MULTI-TIMEFRAME) ---
 STOCKS_DIR = "data_1min"
 MACRO_DIR = "data_macro_1min"
-OUTPUT_DIR = "data_enriched_v4"
+OUTPUT_DIR = "data_enriched_v6_heavy" # Nouveau dossier pour différencier
 
-# Cible (Triple Barrier) adaptée au 1-min
-BARRIER_PROFIT = 0.015 
-BARRIER_STOP = 0.010   
-BARRIER_TIMEOUT = 240  
+COMMON_START_DATE = "2022-02-03"
+
+# Cible Triple Barrier
+BARRIER_TIMEOUT = 30
+ATR_PERIOD = 14
+
 
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
 def prepare_dataframe(df):
-    """Nettoie un DF: index datetime, tri, suppression doublons et timezones"""
-    # Si l'index n'est pas datetime, on le convertit (soit via colonne 'date', soit index)
     if not isinstance(df.index, pd.DatetimeIndex):
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'])
@@ -28,21 +28,17 @@ def prepare_dataframe(df):
         else:
             df.index = pd.to_datetime(df.index)
     
-    # Retire la timezone pour éviter les conflits (UTC vs None)
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
         
-    # Tri et suppression des doublons temporels (garder le dernier en cas de conflit)
     df = df[~df.index.duplicated(keep='last')]
     df.sort_index(inplace=True)
+    df = df[df.index >= COMMON_START_DATE]
     return df
 
 def load_macro_data():
-    """Charge et fusionne toutes les macros en un seul DataFrame large"""
-    print("⏳ Chargement des données Macro...")
+    print(f"⏳ Chargement Macro (Mode V6.1)...")
     macro_files = glob.glob(os.path.join(MACRO_DIR, "*.csv"))
-    
-    # On crée une liste de DataFrames
     macro_dfs = []
     
     for f in macro_files:
@@ -51,107 +47,165 @@ def load_macro_data():
             df = pd.read_csv(f)
             df = prepare_dataframe(df)
             
-            # On ne garde que le Close et le Volume
-            df = df[['close', 'volume']].rename(columns={
-                'close': f'macro_{ticker}_close',
-                'volume': f'macro_{ticker}_vol'
-            })
+            # On crée plusieurs horizons pour la macro aussi !
+            # Court terme (1h) et Moyen terme (4h)
+            close = df['close']
+            df[f'm_{ticker}_ret_1'] = np.log(close / close.shift(1))
+            df[f'm_{ticker}_ret_60'] = np.log(close / close.shift(60)) 
             
-            # Calcul des rendements immédiatement (sur la time-series brute de la macro)
-            df[f'macro_{ticker}_ret'] = df[f'macro_{ticker}_close'].pct_change()
-            
-            macro_dfs.append(df)
-        except Exception as e:
-            print(f"⚠️ Erreur chargement macro {ticker}: {e}")
+            cols = [c for c in df.columns if c.startswith('m_')]
+            macro_dfs.append(df[cols])
+        except: pass
 
-    if not macro_dfs:
-        print("❌ Aucune donnée macro trouvée !")
-        return pd.DataFrame()
-
-    # Fusion intelligente : On fait un outer join pour avoir une timeline globale
-    # Cela permet de ne rien perdre, on alignera plus tard sur l'action
-    print("   Fusion des macros...")
-    macro_global = pd.concat(macro_dfs, axis=1) # Concat sur les colonnes, aligne les index automatiquement
-    
-    # Remplissage : Si une macro a un trou, on garde la valeur d'avant
-    macro_global.ffill(inplace=True)
-    macro_global.dropna(how='all', inplace=True)
-    
-    print(f"✅ Macro globale chargée : {macro_global.shape} lignes")
+    if not macro_dfs: return pd.DataFrame()
+    macro_global = pd.concat(macro_dfs, axis=1)
+    macro_global.fillna(0, inplace=True)
     return macro_global
 
-def add_massive_features(df):
-    """Ajoute une tonne d'indicateurs techniques"""
-    # Copie pour éviter les warnings de fragmentation
-    df = df.copy()
-    
-    # 1. Moyennes Mobiles
-    periods = [5, 9, 14, 21, 50, 200]
-    for p in periods:
-        df.ta.sma(length=p, append=True)
-        df.ta.ema(length=p, append=True)
-    
-    # 2. Oscillateurs
-    df.ta.rsi(length=14, append=True)
-    df.ta.stoch(append=True)
-    df.ta.cci(length=20, append=True)
-    df.ta.willr(append=True)
-    
-    # 3. Volatilité
-    df.ta.bbands(length=20, std=2, append=True)
-    df.ta.atr(length=14, append=True)
-    
-    # 4. Momentum
-    df.ta.macd(append=True)
-    df.ta.adx(length=14, append=True)
-    
-    # 5. Volume & Time
-    df['ret_vol'] = df['volume'].pct_change()
-    
-    df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
-    df['minute_sin'] = np.sin(2 * np.pi * df.index.minute / 60)
-    
-    return df
+def get_atr(df, period=14):
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    return np.max(ranges, axis=1).rolling(period).mean()
 
-def apply_triple_barrier(df):
-    """Génère la cible BUY/SELL/WAIT"""
+def apply_dynamic_barrier(df):
+    atr = get_atr(df, ATR_PERIOD).values
     closes = df['close'].values
     highs = df['high'].values
     lows = df['low'].values
-    labels = np.ones(len(df)) # 1 = WAIT
+    labels = np.ones(len(df)) # Par défaut 1 (WAIT)
+    
+    # --- NOUVEAUX PARAMÈTRES SYMÉTRIQUES ---
+    # On veut des mouvements forts dans les DEUX sens
+    BARRIER_WIDTH = 4.0
     
     for i in range(len(closes) - BARRIER_TIMEOUT):
-        curr = closes[i]
-        target_up = curr * (1 + BARRIER_PROFIT)
-        target_down = curr * (1 - BARRIER_STOP)
+        curr_price = closes[i]
+        curr_atr = atr[i]
         
-        # Fenêtre future
-        window_high = highs[i+1 : i+1+BARRIER_TIMEOUT]
-        window_low = lows[i+1 : i+1+BARRIER_TIMEOUT]
+        if np.isnan(curr_atr) or curr_atr == 0: continue
+            
+        # Barrières symétriques
+        target_up = curr_price + (BARRIER_WIDTH * curr_atr)
+        target_down = curr_price - (BARRIER_WIDTH * curr_atr)
         
-        # On check si barrière touchée
-        hit_up = np.where(window_high >= target_up)[0]
-        hit_down = np.where(window_low <= target_down)[0]
+        window_h = highs[i+1 : i+1+BARRIER_TIMEOUT]
+        window_l = lows[i+1 : i+1+BARRIER_TIMEOUT]
+        
+        hit_up = np.where(window_h >= target_up)[0]
+        hit_down = np.where(window_l <= target_down)[0]
         
         first_up = hit_up[0] if len(hit_up) > 0 else 99999
         first_down = hit_down[0] if len(hit_down) > 0 else 99999
         
-        if first_up < first_down and first_up < 99999:
-            labels[i] = 2 # BUY
-        elif first_down < first_up and first_down < 99999:
-            labels[i] = 0 # SELL
-            
-    labels[-BARRIER_TIMEOUT:] = np.nan
+        if first_up == 99999 and first_down == 99999:
+            labels[i] = 1 # WAIT (Le marché n'a pas assez bougé)
+        elif first_up < first_down:
+            labels[i] = 2 # BUY (Vraie hausse détectée)
+        elif first_down < first_up:
+            labels[i] = 0 # SELL (Vraie baisse détectée)
+        else:
+            labels[i] = 1 # Conflit simultané -> On considère comme du bruit (WAIT)
+
     df['Target'] = labels
+    return df
+
+def add_massive_features(df):
+    """
+    V6.1 : STRATÉGIE MULTI-TIMEFRAME
+    On génère chaque indicateur sur [Fast, Mid, Slow]
+    """
+    df = df.copy()
+    close = df['close']
+    high = df['high']
+    low = df['low']
+    
+    # -- 1. LES BASES --
+    df['log_ret'] = np.log(close / close.shift(1))
+    
+    # -- 2. TIMEFRAMES --
+    # Fast (Scalping), Mid (Intraday), Slow (Trend)
+    # Périodes adaptées à la minute
+    windows_osci = [7, 14, 40]      # RSI, CCI, ADX
+    windows_trend = [20, 50, 200]   # SMA, EMA, Bollinger
+    windows_mom = [5, 15, 60]       # Slope, Momentum
+    
+    # -- 3. TREND FOLLOWERS --
+    for w in windows_trend:
+        # SMA & EMA Distances
+        sma = ta.sma(close, length=w)
+        ema = ta.ema(close, length=w)
+        df[f'dist_sma_{w}'] = np.log(close / sma)
+        df[f'dist_ema_{w}'] = np.log(close / ema)
+        
+        # Bollinger (Width & Pos)
+        bb = ta.bbands(close, length=w, std=2)
+        if bb is not None:
+            bbp = next((c for c in bb.columns if c.startswith('BBP')), None)
+            bbb = next((c for c in bb.columns if c.startswith('BBB')), None)
+            if bbp: df[f'bb_pos_{w}'] = bb[bbp]
+            if bbb: df[f'bb_width_{w}'] = bb[bbb]
+            
+        # Donchian (Breakout)
+        donchian = ta.donchian(high, low, length=w)
+        if donchian is not None:
+            d_low = donchian.iloc[:, 0]
+            d_up = donchian.iloc[:, 2]
+            denom = (d_up - d_low).replace(0, 1)
+            df[f'donchian_pos_{w}'] = (close - d_low) / denom
+
+    # -- 4. OSCILLATEURS (Multi-périodes) --
+    for w in windows_osci:
+        # RSI
+        df[f'rsi_{w}'] = ta.rsi(close, length=w) / 100.0
+        
+        # CCI (Normalisé)
+        df[f'cci_{w}'] = ta.cci(high, low, close, length=w) / 300.0
+        
+        # ADX (Force)
+        adx = ta.adx(high, low, close, length=w)
+        if adx is not None:
+            col = next((c for c in adx.columns if c.startswith('ADX')), None)
+            if col: df[f'adx_{w}'] = adx[col] / 100.0
+            
+        # Aroon
+        aroon = ta.aroon(high, low, length=w)
+        if aroon is not None:
+            au = next((c for c in aroon.columns if c.startswith('AROONU')), None)
+            ad = next((c for c in aroon.columns if c.startswith('AROOND')), None)
+            if au: df[f'aroon_up_{w}'] = aroon[au] / 100.0
+            if ad: df[f'aroon_down_{w}'] = aroon[ad] / 100.0
+            
+        # Choppiness
+        df[f'chop_{w}'] = ta.chop(high, low, close, length=w) / 100.0
+
+    # -- 5. MOMENTUM & GÉOMÉTRIE --
+    for w in windows_mom:
+        # Slope (Pente)
+        slope = ta.slope(close, length=w)
+        df[f'slope_{w}'] = slope / close
+        
+        # Returns cumulés (Momentum pur)
+        df[f'ret_{w}min'] = df['log_ret'].rolling(w).sum()
+
+    # -- 6. MACD (Un seul réglage standard suffit souvent, mais on peut ajouter un rapide)
+    macd = ta.macd(close) # 12, 26
+    if macd is not None:
+        h = next((c for c in macd.columns if c.startswith('MACDh')), None)
+        if h: df['macd_hist'] = macd[h] / close
+
+    # -- 7. TIME --
+    df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
+
     return df
 
 # --- MAIN ---
 if __name__ == "__main__":
-    # 1. Charger la Macro
     macro_global = load_macro_data()
-    
     stock_files = glob.glob(os.path.join(STOCKS_DIR, "*.csv"))
-    print(f"🚀 Enrichissement de {len(stock_files)} actions...")
+    print(f"🚀 Enrichissement V6.1 (Heavy) sur {len(stock_files)} actions...")
     
     for f in tqdm(stock_files):
         try:
@@ -161,33 +215,25 @@ if __name__ == "__main__":
             
             if len(df) < 1000: continue 
             
-            # --- LA CLÉ DU SUCCÈS : ALIGNEMENT ---
-            # On prend la macro, et on la force à s'adapter aux dates de l'Action
-            # reindex(index_de_l_action) : Ne garde que les lignes correspondant à l'action
-            # method='ffill' : Si la minute exacte n'existe pas en macro, prend la précédente
-            macro_aligned = macro_global.reindex(df.index, method='ffill')
+            if not macro_global.empty:
+                macro_aligned = macro_global.reindex(df.index, method='ffill').fillna(0)
+                df = pd.concat([df, macro_aligned], axis=1)
             
-            # Il peut rester des NaN au tout début si l'action a des données avant la macro
-            # On peut bfill (remplir avec la première valeur future) pour le début
-            macro_aligned.bfill(inplace=True)
-            
-            # Fusion Colonnes
-            df = pd.concat([df, macro_aligned], axis=1)
-            
-            # 2. Indicateurs Techniques
+            df = apply_dynamic_barrier(df)
             df = add_massive_features(df)
             
-            # 3. Cible
-            df = apply_triple_barrier(df)
+            cols_to_drop = ['open', 'high', 'low', 'close', 'volume']
+            cols_final = [c for c in df.columns if c not in cols_to_drop]
             
-            # 4. Nettoyage Final
-            df.dropna(inplace=True)
+            df_clean = df[cols_final].copy()
             
-            # 5. Sauvegarde
-            save_path = os.path.join(OUTPUT_DIR, f"{ticker}_enriched.csv")
-            df.to_csv(save_path)
+            # --- CORRECTION INFINIS ---
+            df_clean.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df_clean.dropna(inplace=True)
+            
+            df_clean.to_csv(os.path.join(OUTPUT_DIR, f"{ticker}_stationary.csv"))
             
         except Exception as e:
             print(f"❌ Erreur {ticker}: {e}")
 
-    print("\n🎉 Enrichissement terminé.")
+    print(f"\n🎉 Terminé. Données V6.1 dans '{OUTPUT_DIR}'")
