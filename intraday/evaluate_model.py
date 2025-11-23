@@ -28,6 +28,27 @@ if gpus:
 policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_global_policy(policy)
 
+class SparseCategoricalFocalLoss(tf.keras.losses.Loss):
+    def __init__(self, gamma=2.0, from_logits=False, **kwargs):
+        super().__init__(**kwargs)
+        self.gamma = gamma
+        self.from_logits = from_logits
+
+    def call(self, y_true, y_pred):
+        if self.from_logits:
+            y_pred = tf.nn.softmax(y_pred)
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+        y_true = tf.cast(y_true, tf.int32)
+        y_pred_true_class = tf.gather(y_pred, y_true, batch_dims=1, axis=1)
+        loss = - ((1 - y_pred_true_class) ** self.gamma) * tf.math.log(y_pred_true_class)
+        return tf.reduce_mean(loss)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'gamma': self.gamma, 'from_logits': self.from_logits})
+        return config
+
 # --- RECONSTRUCTION COUCHE CUSTOM ---
 class PositionalEmbedding(layers.Layer):
     def __init__(self, sequence_length, output_dim, **kwargs):
@@ -56,7 +77,7 @@ def evaluate_safe():
     scaler = joblib.load(SCALER_PATH)
     
     print("🧠 Chargement du modèle...")
-    model = models.load_model(MODEL_PATH, custom_objects={'PositionalEmbedding': PositionalEmbedding})
+    model = models.load_model(MODEL_PATH, custom_objects={'PositionalEmbedding': PositionalEmbedding,'SparseCategoricalFocalLoss': SparseCategoricalFocalLoss})
     
     # ⚡ ASTUCE : On compile avec jit_compile=False pour éviter la recompilation incessante
     # sur des fichiers de tailles variables. C'est beaucoup plus fluide pour le test.

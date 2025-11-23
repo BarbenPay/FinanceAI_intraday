@@ -199,6 +199,30 @@ def add_massive_features(df):
     df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
 
+    # --- AJOUT V6.5 : INDICATEURS INSTITUTIONNELS (SMART MONEY) ---
+    
+    # 1. VWAP (Volume Weighted Average Price)
+    # Même avec le volume IEX, le VWAP reste une résistance psychologique majeure.
+    # On utilise l'ancrage journalier ('D').
+    vwap = ta.vwap(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], anchor='D')
+    
+    # IMPORTANT : On ne garde que la DISTANCE en % (Stationnaire)
+    # Si vwap est NaN (début de journée), on remplace par 0
+    df['dist_vwap'] = (df['close'] - vwap) / vwap
+    df['dist_vwap'] = df['dist_vwap'].fillna(0)
+
+    # 2. VOLATILITÉ RELATIVE DU VOLUME (Z-Score)
+    # On se fiche du volume absolu (IEX). On veut savoir si c'est "calme" ou "panique" 
+    # par rapport à d'habitude SUR CE MÊME EXCHANGE.
+    vol_mean = df['volume'].rolling(window=20).mean()
+    vol_std = df['volume'].rolling(window=20).std()
+    
+    # On ajoute une petite valeur epsilon (1e-6) pour éviter la division par zéro
+    df['vol_zscore'] = (df['volume'] - vol_mean) / (vol_std + 1e-6)
+    
+    # Nettoyage des NaN créés par le rolling
+    df['vol_zscore'] = df['vol_zscore'].fillna(0)
+
     return df
 
 # --- MAIN ---

@@ -47,6 +47,36 @@ gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     for gpu in gpus: tf.config.experimental.set_memory_growth(gpu, True)
 
+
+# --- CUSTOM LOSS (PERMABULL KILLER) ---
+class SparseCategoricalFocalLoss(tf.keras.losses.Loss):
+    def __init__(self, gamma=2.0, from_logits=False, **kwargs):
+        super().__init__(**kwargs)
+        self.gamma = gamma
+        self.from_logits = from_logits
+
+    def call(self, y_true, y_pred):
+        if self.from_logits:
+            y_pred = tf.nn.softmax(y_pred)
+        
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+
+        y_true = tf.cast(y_true, tf.int32)
+        # On récupère la proba prédite pour la VRAIE classe
+        y_pred_true_class = tf.gather(y_pred, y_true, batch_dims=1, axis=1)
+
+        # Formule Focal Loss : (1 - p)^gamma * log(p)
+        # Plus le modèle est confiant (p proche de 1), moins ça compte.
+        # Si le modèle se trompe (p faible), le poids (1-p)^gamma devient énorme.
+        loss = - ((1 - y_pred_true_class) ** self.gamma) * tf.math.log(y_pred_true_class)
+        return tf.reduce_mean(loss)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'gamma': self.gamma, 'from_logits': self.from_logits})
+        return config
+
 # --- COUCHES DU MODÈLE ---
 class PositionalEmbedding(layers.Layer):
     def __init__(self, sequence_length, output_dim, **kwargs):
@@ -245,7 +275,7 @@ def build_model_balanced(input_shape, n_classes):
     model = models.Model(inputs, outputs)
     model.compile(
         optimizer=optimizers.AdamW(learning_rate=LEARNING_RATE, weight_decay=1e-4),
-        loss="sparse_categorical_crossentropy", 
+        loss=SparseCategoricalFocalLoss(gamma=2.0, from_logits=False),
         metrics=["accuracy"],
         jit_compile=True
     )
@@ -290,9 +320,9 @@ if __name__ == "__main__":
     ]
 
     class_weights = {
-    0: 1.2,  # Important
-    1: 0.8,  # Moins grave si on se trompe sur le Wait
-    2: 1.3   # TRÈS Important (On force le BUY)
+    0: 1.0,  # Important
+    1: 0.7,  # Moins grave si on se trompe sur le Wait
+    2: 1.6   # TRÈS Important (On force le BUY)
 }
 
     print(f"\n🚀 GO TRAIN V6.3 (tf.data optimized) - Steps: {DISPLAY_STEPS}")
@@ -312,8 +342,10 @@ if __name__ == "__main__":
     model.load_weights(MODEL_PATH)
     
     all_preds, all_true = [], []
-    for i in tqdm(range(len(test_ds))):
-        X_b, y_b = test_ds[i]
+
+    print(f"🔍 Audit sur {VALIDATION_STEPS} batchs...")
+
+    for X_b, y_b in tqdm(test_ds.take(VALIDATION_STEPS), total=VALIDATION_STEPS):
         p = model.predict_on_batch(X_b)
         all_preds.append(np.argmax(p, axis=1))
         all_true.append(y_b)

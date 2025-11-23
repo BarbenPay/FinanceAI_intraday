@@ -10,8 +10,8 @@ from tqdm import tqdm
 
 # --- CONFIG ---
 DATA_DIR = "data_enriched_v6_heavy" # Le nouveau dossier propre
-SAMPLE_FRACTION = 0.40 # On prend 40% des données pour aller vite (augmenter si besoin)
-TOP_N = 40 # On garde les 40 meilleures features
+SAMPLE_FRACTION = 0.50 # On prend 50% des données pour aller vite (augmenter si besoin)
+TOP_N = 35 # On garde les 35 meilleures features
 
 print("--- SÉLECTION DES FEATURES (V6 HEAVY) ---")
 
