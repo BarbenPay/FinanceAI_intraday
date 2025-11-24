@@ -19,10 +19,10 @@ policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_global_policy(policy)
 
 # --- CONFIGURATION V6.3 (BALANCED FINAL) ---
-DATA_DIR = 'data_enriched_v6_heavy'
-FEATURES_PATH = 'selected_features_v6.pkl'
-SCALER_PATH = 'scaler_v6.pkl'
-MODEL_PATH = 'transformer_v6_balanced.keras'
+DATA_DIR = 'data_enriched_v7_sota'
+FEATURES_PATH = 'selected_features_v7.pkl'
+SCALER_PATH = 'scaler_v7.pkl'
+MODEL_PATH = 'transformer_v7_balanced.keras'
 
 # Paramètres Temporels & Modèle
 SEQ_LEN = 180
@@ -275,7 +275,7 @@ def build_model_balanced(input_shape, n_classes):
     model = models.Model(inputs, outputs)
     model.compile(
         optimizer=optimizers.AdamW(learning_rate=LEARNING_RATE, weight_decay=1e-4),
-        loss=SparseCategoricalFocalLoss(gamma=2.0, from_logits=False),
+        loss=SparseCategoricalFocalLoss(gamma=3.0, from_logits=False),
         metrics=["accuracy"],
         jit_compile=True
     )
@@ -320,9 +320,9 @@ if __name__ == "__main__":
     ]
 
     class_weights = {
-    0: 1.0,  # Important
-    1: 0.7,  # Moins grave si on se trompe sur le Wait
-    2: 1.6   # TRÈS Important (On force le BUY)
+    0: 1.5,  # Important
+    1: 0.5,  # Moins grave si on se trompe sur le Wait
+    2: 2.5   # TRÈS Important (On force le BUY)
 }
 
     print(f"\n🚀 GO TRAIN V6.3 (tf.data optimized) - Steps: {DISPLAY_STEPS}")

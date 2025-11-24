@@ -5,17 +5,16 @@ import os
 import glob
 from tqdm import tqdm
 
-# --- CONFIGURATION V6.1 (MULTI-TIMEFRAME) ---
+# --- CONFIGURATION V7.2 (ULTIMATE MERGE) ---
 STOCKS_DIR = "data_1min"
 MACRO_DIR = "data_macro_1min"
-OUTPUT_DIR = "data_enriched_v6_heavy" # Nouveau dossier pour différencier
-
+OUTPUT_DIR = "data_enriched_v7_sota" 
 COMMON_START_DATE = "2022-02-03"
 
-# Cible Triple Barrier
+# Paramètres Triple Barrier
 BARRIER_TIMEOUT = 30
 ATR_PERIOD = 14
-
+BARRIER_WIDTH = 4.0 
 
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
@@ -33,52 +32,37 @@ def prepare_dataframe(df):
         
     df = df[~df.index.duplicated(keep='last')]
     df.sort_index(inplace=True)
-    df = df[df.index >= COMMON_START_DATE]
-    return df
+    return df[df.index >= COMMON_START_DATE]
 
 def load_macro_data():
-    print(f"⏳ Chargement Macro (Mode V6.1)...")
     macro_files = glob.glob(os.path.join(MACRO_DIR, "*.csv"))
     macro_dfs = []
-    
     for f in macro_files:
         ticker = os.path.basename(f).replace('_1min.csv', '')
         try:
             df = pd.read_csv(f)
             df = prepare_dataframe(df)
-            
-            # On crée plusieurs horizons pour la macro aussi !
-            # Court terme (1h) et Moyen terme (4h)
             close = df['close']
             df[f'm_{ticker}_ret_1'] = np.log(close / close.shift(1))
             df[f'm_{ticker}_ret_60'] = np.log(close / close.shift(60)) 
-            
             cols = [c for c in df.columns if c.startswith('m_')]
             macro_dfs.append(df[cols])
         except: pass
-
+    
     if not macro_dfs: return pd.DataFrame()
-    macro_global = pd.concat(macro_dfs, axis=1)
-    macro_global.fillna(0, inplace=True)
-    return macro_global
+    return pd.concat(macro_dfs, axis=1).fillna(0)
 
-def get_atr(df, period=14):
+def apply_dynamic_barrier(df):
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    return np.max(ranges, axis=1).rolling(period).mean()
+    atr = np.max(ranges, axis=1).rolling(ATR_PERIOD).mean().values
 
-def apply_dynamic_barrier(df):
-    atr = get_atr(df, ATR_PERIOD).values
     closes = df['close'].values
     highs = df['high'].values
     lows = df['low'].values
-    labels = np.ones(len(df)) # Par défaut 1 (WAIT)
-    
-    # --- NOUVEAUX PARAMÈTRES SYMÉTRIQUES ---
-    # On veut des mouvements forts dans les DEUX sens
-    BARRIER_WIDTH = 4.0
+    labels = np.ones(len(df)) # 1 = WAIT
     
     for i in range(len(closes) - BARRIER_TIMEOUT):
         curr_price = closes[i]
@@ -86,7 +70,6 @@ def apply_dynamic_barrier(df):
         
         if np.isnan(curr_atr) or curr_atr == 0: continue
             
-        # Barrières symétriques
         target_up = curr_price + (BARRIER_WIDTH * curr_atr)
         target_down = curr_price - (BARRIER_WIDTH * curr_atr)
         
@@ -99,137 +82,171 @@ def apply_dynamic_barrier(df):
         first_up = hit_up[0] if len(hit_up) > 0 else 99999
         first_down = hit_down[0] if len(hit_down) > 0 else 99999
         
-        if first_up == 99999 and first_down == 99999:
-            labels[i] = 1 # WAIT (Le marché n'a pas assez bougé)
-        elif first_up < first_down:
-            labels[i] = 2 # BUY (Vraie hausse détectée)
-        elif first_down < first_up:
-            labels[i] = 0 # SELL (Vraie baisse détectée)
-        else:
-            labels[i] = 1 # Conflit simultané -> On considère comme du bruit (WAIT)
+        if first_up == 99999 and first_down == 99999: labels[i] = 1
+        elif first_up < first_down: labels[i] = 2 # BUY
+        elif first_down < first_up: labels[i] = 0 # SELL
+        else: labels[i] = 1
 
     df['Target'] = labels
     return df
 
 def add_massive_features(df):
     """
-    V6.1 : STRATÉGIE MULTI-TIMEFRAME
-    On génère chaque indicateur sur [Fast, Mid, Slow]
+    V7.2 ULTIMATE : Fusion V6 (Multi-Timeframe) + V7 (SOTA)
+    Total attendu : ~87 features stationnaires.
     """
     df = df.copy()
-    close = df['close']
-    high = df['high']
-    low = df['low']
-    
-    # -- 1. LES BASES --
-    df['log_ret'] = np.log(close / close.shift(1))
-    
-    # -- 2. TIMEFRAMES --
-    # Fast (Scalping), Mid (Intraday), Slow (Trend)
-    # Périodes adaptées à la minute
+    o = df['open']
+    h = df['high']
+    l = df['low']
+    c = df['close']
+    v = df['volume']
+
+    # ==========================================
+    # 🏛️ PARTIE 1 : SOCLE V6 (Multi-Timeframe)
+    # ==========================================
+    df['log_ret'] = np.log(c / c.shift(1))
+
+    # Périodes
     windows_osci = [7, 14, 40]      # RSI, CCI, ADX
     windows_trend = [20, 50, 200]   # SMA, EMA, Bollinger
     windows_mom = [5, 15, 60]       # Slope, Momentum
-    
-    # -- 3. TREND FOLLOWERS --
+
+    # -- TREND --
     for w in windows_trend:
-        # SMA & EMA Distances
-        sma = ta.sma(close, length=w)
-        ema = ta.ema(close, length=w)
-        df[f'dist_sma_{w}'] = np.log(close / sma)
-        df[f'dist_ema_{w}'] = np.log(close / ema)
+        # SMA & EMA Distances (Stationnaire : log distance)
+        sma = ta.sma(c, length=w)
+        ema = ta.ema(c, length=w)
+        df[f'dist_sma_{w}'] = np.log(c / sma)
+        df[f'dist_ema_{w}'] = np.log(c / ema)
         
-        # Bollinger (Width & Pos)
-        bb = ta.bbands(close, length=w, std=2)
+        # Bollinger (Pos & Width sont déjà stationnaires)
+        bb = ta.bbands(c, length=w, std=2)
         if bb is not None:
-            bbp = next((c for c in bb.columns if c.startswith('BBP')), None)
-            bbb = next((c for c in bb.columns if c.startswith('BBB')), None)
+            bbp = next((col for col in bb.columns if col.startswith('BBP')), None)
+            bbb = next((col for col in bb.columns if col.startswith('BBB')), None)
             if bbp: df[f'bb_pos_{w}'] = bb[bbp]
             if bbb: df[f'bb_width_{w}'] = bb[bbb]
             
-        # Donchian (Breakout)
-        donchian = ta.donchian(high, low, length=w)
+        # Donchian (Stationnarisé)
+        donchian = ta.donchian(h, l, length=w)
         if donchian is not None:
             d_low = donchian.iloc[:, 0]
             d_up = donchian.iloc[:, 2]
             denom = (d_up - d_low).replace(0, 1)
-            df[f'donchian_pos_{w}'] = (close - d_low) / denom
+            df[f'donchian_pos_{w}'] = (c - d_low) / denom
 
-    # -- 4. OSCILLATEURS (Multi-périodes) --
+    # -- OSCILLATEURS --
     for w in windows_osci:
         # RSI
-        df[f'rsi_{w}'] = ta.rsi(close, length=w) / 100.0
-        
+        df[f'rsi_{w}'] = ta.rsi(c, length=w) / 100.0
         # CCI (Normalisé)
-        df[f'cci_{w}'] = ta.cci(high, low, close, length=w) / 300.0
-        
-        # ADX (Force)
-        adx = ta.adx(high, low, close, length=w)
+        df[f'cci_{w}'] = ta.cci(h, l, c, length=w) / 300.0
+        # ADX
+        adx = ta.adx(h, l, c, length=w)
         if adx is not None:
-            col = next((c for c in adx.columns if c.startswith('ADX')), None)
+            col = next((col for col in adx.columns if col.startswith('ADX')), None)
             if col: df[f'adx_{w}'] = adx[col] / 100.0
-            
         # Aroon
-        aroon = ta.aroon(high, low, length=w)
+        aroon = ta.aroon(h, l, length=w)
         if aroon is not None:
-            au = next((c for c in aroon.columns if c.startswith('AROONU')), None)
-            ad = next((c for c in aroon.columns if c.startswith('AROOND')), None)
+            au = next((col for col in aroon.columns if col.startswith('AROONU')), None)
+            ad = next((col for col in aroon.columns if col.startswith('AROOND')), None)
             if au: df[f'aroon_up_{w}'] = aroon[au] / 100.0
             if ad: df[f'aroon_down_{w}'] = aroon[ad] / 100.0
-            
-        # Choppiness
-        df[f'chop_{w}'] = ta.chop(high, low, close, length=w) / 100.0
+        # Chop
+        df[f'chop_{w}'] = ta.chop(h, l, c, length=w) / 100.0
 
-    # -- 5. MOMENTUM & GÉOMÉTRIE --
+    # -- MOMENTUM --
     for w in windows_mom:
-        # Slope (Pente)
-        slope = ta.slope(close, length=w)
-        df[f'slope_{w}'] = slope / close
-        
-        # Returns cumulés (Momentum pur)
+        # Slope (Pente) -> Divisée par le prix pour être stationnaire !
+        slope = ta.slope(c, length=w)
+        df[f'slope_{w}'] = slope / c
+        # Returns cumulés
         df[f'ret_{w}min'] = df['log_ret'].rolling(w).sum()
 
-    # -- 6. MACD (Un seul réglage standard suffit souvent, mais on peut ajouter un rapide)
-    macd = ta.macd(close) # 12, 26
+    # MACD
+    macd = ta.macd(c)
     if macd is not None:
-        h = next((c for c in macd.columns if c.startswith('MACDh')), None)
-        if h: df['macd_hist'] = macd[h] / close
+        h_macd = next((col for col in macd.columns if col.startswith('MACDh')), None)
+        if h_macd: df['macd_hist'] = macd[h_macd] / c
 
-    # -- 7. TIME --
+    # Time Encoding
     df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
 
-    # --- AJOUT V6.5 : INDICATEURS INSTITUTIONNELS (SMART MONEY) ---
+
+    # ==========================================
+    # 🚀 PARTIE 2 : AJOUTS V7 SOTA (30 New)
+    # ==========================================
     
-    # 1. VWAP (Volume Weighted Average Price)
-    # Même avec le volume IEX, le VWAP reste une résistance psychologique majeure.
-    # On utilise l'ancrage journalier ('D').
-    vwap = ta.vwap(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], anchor='D')
+    # 1. PRICE ACTION (Pure)
+    rng = (h - l).replace(0, 1e-6)
+    df['candle_body_rel'] = abs(c - o) / rng
+    df['shadow_up'] = (h - np.maximum(c, o)) / rng
+    df['shadow_down'] = (np.minimum(c, o) - l) / rng
+    df['gap_open'] = np.log(o / c.shift(1))
+
+    # 2. VOLATILITÉ AVANCÉE
+    # Garman-Klass
+    log_hl = np.log(h / l.replace(0, 1e-6))
+    log_co = np.log(c / o.replace(0, 1e-6))
+    df['vol_gk'] = (0.5 * log_hl**2 - (2 * np.log(2) - 1) * log_co**2)
     
-    # IMPORTANT : On ne garde que la DISTANCE en % (Stationnaire)
-    # Si vwap est NaN (début de journée), on remplace par 0
-    df['dist_vwap'] = (df['close'] - vwap) / vwap
+    # Efficiency Ratio
+    change = c.diff(10).abs()
+    path = c.diff(1).abs().rolling(10).sum()
+    df['efficiency_ratio'] = change / (path + 1e-6)
+
+    # 3. SMART MONEY (Volume)
+    # MFI (déjà dans loop ? non mfi n'y était pas, on l'ajoute)
+    df['mfi_14_sota'] = ta.mfi(h, l, c, v, length=14) / 100.0
+    df['cmf_20'] = ta.cmf(h, l, c, v, length=20)
+    
+    # Force Index Normalisé
+    fi = (c - c.shift(1)) * v
+    df['force_idx'] = ta.ema(fi, length=13) / (v.rolling(20).mean() + 1e-6)
+    
+    # VWAP Distance (Ton Alpha V6.5)
+    vwap_d = ta.vwap(h, l, c, v, anchor='D')
+    df['dist_vwap'] = (c - vwap_d) / (vwap_d + 1e-6)
     df['dist_vwap'] = df['dist_vwap'].fillna(0)
 
-    # 2. VOLATILITÉ RELATIVE DU VOLUME (Z-Score)
-    # On se fiche du volume absolu (IEX). On veut savoir si c'est "calme" ou "panique" 
-    # par rapport à d'habitude SUR CE MÊME EXCHANGE.
-    vol_mean = df['volume'].rolling(window=20).mean()
-    vol_std = df['volume'].rolling(window=20).std()
+    # Volume Z-Score
+    vol_mean = v.rolling(20).mean()
+    vol_std = v.rolling(20).std()
+    df['vol_zscore'] = (v - vol_mean) / (vol_std + 1e-6)
+
+    # 4. MOMENTUM SOTA
+    # Trix
+    trix_df = ta.trix(c, length=14)
+    if trix_df is not None: df['trix'] = trix_df.iloc[:, 0]
     
-    # On ajoute une petite valeur epsilon (1e-6) pour éviter la division par zéro
-    df['vol_zscore'] = (df['volume'] - vol_mean) / (vol_std + 1e-6)
+    # Williams %R
+    df['willr_14'] = ta.willr(h, l, c, length=14) / -100.0
     
-    # Nettoyage des NaN créés par le rolling
-    df['vol_zscore'] = df['vol_zscore'].fillna(0)
+    # Fisher Transform
+    fisher = ta.fisher(h, l, length=9)
+    if fisher is not None: df['fisher_t'] = fisher.iloc[:, 0]
+
+    # 5. STATS (Distribution)
+    df['skew_20'] = c.rolling(20).skew()
+    df['kurt_20'] = c.rolling(20).kurt()
+    
+    # Z-Score Price
+    sma_20 = ta.sma(c, length=20)
+    std_20 = c.rolling(20).std()
+    df['zscore_price'] = (c - sma_20) / (std_20 + 1e-6)
+
+    # Remplissage des NaN (dus aux rolling windows)
+    df.fillna(0, inplace=True)
 
     return df
 
-# --- MAIN ---
 if __name__ == "__main__":
     macro_global = load_macro_data()
     stock_files = glob.glob(os.path.join(STOCKS_DIR, "*.csv"))
-    print(f"🚀 Enrichissement V6.1 (Heavy) sur {len(stock_files)} actions...")
+    print(f"🚀 Enrichissement V7.2 (ULTIMATE MERGE) sur {len(stock_files)} actions...")
     
     for f in tqdm(stock_files):
         try:
@@ -247,11 +264,7 @@ if __name__ == "__main__":
             df = add_massive_features(df)
             
             cols_to_drop = ['open', 'high', 'low', 'close', 'volume']
-            cols_final = [c for c in df.columns if c not in cols_to_drop]
-            
-            df_clean = df[cols_final].copy()
-            
-            # --- CORRECTION INFINIS ---
+            df_clean = df.drop(columns=cols_to_drop, errors='ignore')
             df_clean.replace([np.inf, -np.inf], np.nan, inplace=True)
             df_clean.dropna(inplace=True)
             
@@ -259,5 +272,3 @@ if __name__ == "__main__":
             
         except Exception as e:
             print(f"❌ Erreur {ticker}: {e}")
-
-    print(f"\n🎉 Terminé. Données V6.1 dans '{OUTPUT_DIR}'")

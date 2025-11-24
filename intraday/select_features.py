@@ -4,94 +4,81 @@ import glob
 import os
 import joblib
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 
 # --- CONFIG ---
-DATA_DIR = "data_enriched_v6_heavy" # Le nouveau dossier propre
-SAMPLE_FRACTION = 0.50 # On prend 50% des données pour aller vite (augmenter si besoin)
-TOP_N = 35 # On garde les 35 meilleures features
+DATA_DIR = "data_enriched_v7_sota" # Dossier V7
+SAMPLE_FRACTION = 0.10 # 10% suffit largement avec Permutation Importance
+TOP_N = 35
+CORR_THRESH = 0.90 # Seuil de purge des corrélations
 
-print("--- SÉLECTION DES FEATURES (V6 HEAVY) ---")
-
-if not os.path.exists(DATA_DIR):
-    print(f"❌ Erreur : Le dossier '{DATA_DIR}' n'existe pas. Lance enrich_data.py d'abord.")
-    exit()
+print("--- SÉLECTION DES FEATURES V7 (Mode SOTA) ---")
 
 files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
 data_chunks = []
 
-print(f"🎲 Chargement échantillon aléatoire ({SAMPLE_FRACTION*100}%) sur {len(files)} fichiers...")
-
-for f in tqdm(files):
+# On charge un échantillon représentatif
+for f in tqdm(files[:25]): 
     try:
-        # Lecture optimisée
         df = pd.read_csv(f, index_col=0, parse_dates=True)
-        
-        # On ignore les petits fichiers
-        if len(df) > 500:
-            # On prend un échantillon aléatoire pour ne pas surcharger la RAM
-            chunk = df.sample(frac=SAMPLE_FRACTION, random_state=42)
-            data_chunks.append(chunk)
-    except Exception as e:
-        print(f"⚠️ Erreur lecture {f}: {e}")
+        if len(df) > 1000:
+            # On prend des blocs aléatoires pour avoir tous les régimes
+            data_chunks.append(df.sample(frac=SAMPLE_FRACTION, random_state=42))
+    except: pass
 
-if not data_chunks:
-    print("❌ Erreur : Pas de données chargées.")
-    exit()
-
-# Fusion
 full_df = pd.concat(data_chunks)
 full_df.replace([np.inf, -np.inf], np.nan, inplace=True)
 full_df.dropna(inplace=True)
 
-print(f"📊 Analyse sur {len(full_df)} lignes cumulées.")
-
-# --- PRÉPARATION ---
-# On récupère toutes les colonnes sauf la Target
-all_cols = full_df.columns.tolist()
-features = [c for c in all_cols if c != 'Target']
-
-print(f"🔎 Features candidates : {len(features)}")
-
-X = full_df[features]
+X = full_df.drop(columns=['Target'])
 y = full_df['Target'].astype(int)
 
-# --- ENTRAÎNEMENT DU JUGE ---
-print("🧠 Entraînement du Random Forest (Cela peut prendre 1-2 min)...")
-# n_jobs=-1 utilise tous les coeurs du CPU
-rf = RandomForestClassifier(
-    n_estimators=150, 
-    max_depth=12, 
-    n_jobs=-1, 
-    random_state=42, 
-    class_weight='balanced'
-)
-rf.fit(X, y)
+print(f"📊 Dataset: {len(X)} lignes, {len(X.columns)} features brutes.")
 
-# --- RÉSULTATS ---
-importances = rf.feature_importances_
-indices = np.argsort(importances)[::-1]
+# 1. PURGE DES CORRÉLATIONS
+print("✂️ Suppression des doublons (Corrélation > 0.9)...")
+corr_matrix = X.corr().abs()
+upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+to_drop = [column for column in upper.columns if any(upper[column] > CORR_THRESH)]
 
-print("\n🏆 --- TOP FEATURES V5 (STATIONNAIRE) ---")
-selected_features = []
+X_clean = X.drop(columns=to_drop)
+print(f"   👉 {len(to_drop)} features supprimées. Reste : {len(X_clean.columns)}")
 
-for i in range(min(TOP_N, len(features))):
-    feat = features[indices[i]]
-    score = importances[indices[i]]
-    print(f"{i+1}. {feat:<25} ({score:.4f})")
-    selected_features.append(feat)
+# 2. ENTRAÎNEMENT DU JUGE
+# On garde shuffle=True ici car on veut savoir quelles features 
+# sont intrinsèquement bonnes, peu importe l'ordre temporel pour ce test.
+X_train, X_val, y_train, y_val = train_test_split(X_clean, y, test_size=0.3, random_state=42)
 
-# Sauvegarde
-joblib.dump(selected_features, 'selected_features_v6.pkl')
-print(f"\n✅ Liste sauvegardée dans 'selected_features_v6.pkl'")
+print("🧠 Entraînement Random Forest (Soyez patient)...")
+rf = RandomForestClassifier(n_estimators=100, max_depth=12, n_jobs=-1, class_weight='balanced')
+rf.fit(X_train, y_train)
+
+# 3. PERMUTATION IMPORTANCE (Le vrai test)
+print("🕵️‍♂️ Calcul de l'impact réel (Permutation)...")
+result = permutation_importance(rf, X_val, y_val, n_repeats=3, random_state=42, n_jobs=-1)
+perm_sorted_idx = result.importances_mean.argsort()[::-1]
+
+# 4. SAUVEGARDE TOP N
+final_features = []
+print("\n🏆 --- TOP FEATURES V7 ---")
+for i in range(min(TOP_N, len(X_clean.columns))):
+    idx = perm_sorted_idx[i]
+    feat = X_clean.columns[idx]
+    score = result.importances_mean[idx]
+    print(f"{i+1}. {feat:<20} (Score: {score:.6f})")
+    final_features.append(feat)
+
+joblib.dump(final_features, 'selected_features_v7.pkl')
+print("\n✅ Liste sauvegardée dans 'selected_features_v7.pkl'")
 
 # Graphique
 plt.figure(figsize=(12, 10))
-sns.barplot(x=importances[indices[:TOP_N]], y=[features[i] for i in indices[:TOP_N]], palette="viridis")
-plt.title("Importance des Features (Données Stationnaires V6)")
-plt.xlabel("Importance (Gini)")
+sns.barplot(x=result.importances_mean[perm_sorted_idx[:TOP_N]], 
+            y=X_clean.columns[perm_sorted_idx[:TOP_N]], palette="viridis")
+plt.title("Importance par Permutation (V7)")
 plt.tight_layout()
-plt.savefig("features_v6.png")
-print("✅ Graphique sauvegardé : features_v6.png")
+plt.savefig("features_v7.png")

@@ -1,6 +1,8 @@
-# 📈 FinanceAI Intraday (V6)
+# 📈 FinanceAI Intraday (V7)
 
-Ce projet implémente un pipeline de Deep Learning complet pour le trading intraday sur actions américaines et crypto-monnaies. Il utilise une architecture **Transformer** (Encoder) pour prédire les mouvements de prix à court terme (horizon ~3h / 180 minutes) en se basant sur la **Triple Barrier Method**.
+Ce projet implémente un pipeline de **Trading Quantitatif** complet pour le trading intraday sur actions américaines et crypto-monnaies. Il dépasse les approches "Retail" classiques en intégrant des concepts issus de la recherche institutionnelle (SOTA) : **Volatilité Garman-Klass**, **Microstructure (Shadows)**, **Focal Loss** et **Optimisation de Seuil**.
+
+L'architecture repose sur un **Transformer** (Encoder) conçu pour battre le hasard de manière significative sur un horizon de ~3h (180 minutes).
 
 ---
 
@@ -9,11 +11,10 @@ Ce projet implémente un pipeline de Deep Learning complet pour le trading intra
 Le flux de travail est divisé en scripts modulaires pour garantir la propreté des données et éviter le "Data Leakage".
 
 1.  **`collect_data.py`** : Récupération des données brutes (OHLCV) via API (Tiingo). Gère les limites de requêtes et la reprise sur erreur.
-2.  **`enrich_data.py`** : Calcul des indicateurs techniques, ajout des données Macro, et génération de la **Target** (Triple Barrier). Nettoyage des infinis/NaN.
-3.  **`select_features.py`** : Analyse l'importance des features (Random Forest) pour ne garder que les plus pertinentes (réduction de bruit).
-4.  **`optimize_threshold.py`** : Analyse de sensibilité pour déterminer les meilleurs seuils de déclenchement.
-5.  **`train_transformer.py`** : Entraînement du modèle Deep Learning avec gestion de la mémoire (tf.data) et pondération des classes.
-6.  **`evaluate_model.py`** : Audit final sur des données de test jamais vues (Out-of-Sample).
+2.  **`enrich_data.py`** : Calcul de 87 features stationnaires. Utilisation de ratios et de logs pour garantir que les données de 2022 sont mathématiquement comparables à celles de 2025.
+3.  **`select_features.py`** : Sélection des meilleures variables via **Permutation Importance** (et non plus Gini), éliminant la colinéarité.
+4.  **`train_transformer.py`** : Entraînement avec gestion mémoire tf.data, **Mixed Precision (RTX Optimized)**, et pondération des classes "Lava Floor" (pour forcer la prise de décision).
+5.  **`optimize_threshold.py`** : Le cœur de la stratégie. Scanne les probabilités de sortie pour trouver le seuil qui maximise l'Edge mathématique.
 
 ---
 
@@ -30,23 +31,23 @@ Données minutieuses sur des actions tech volatiles.
 | **AMD** | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
 | **TSLA** | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
 | **COIN** | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
-| SHOP     | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
-PLTR       | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
-SNOW       | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
-NET        | 2022-01-10 | 2025-11-20 | ✅ EXCELLENT |
-U          | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-RIVN       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-LCID       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-PLUG       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-ENPH       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-MRNA       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-CRSP       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-TDOC       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-AMC        | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-GME        | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-SPCE       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-MARA       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
-MSTR       | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **SHOP** | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
+| **PLTR** | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
+| **SNOW** | 2022-01-31 | 2025-11-20 | ✅ EXCELLENT |
+| **NET** | 2022-01-10 | 2025-11-20 | ✅ EXCELLENT |
+| **U** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **RIVN** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **LCID** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **PLUG** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **ENPH** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **MRNA** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **CRSP** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **TDOC** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **AMC** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **GME** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **SPCE** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **MARA** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
+| **MSTR** | 2022-02-03 | 2025-11-20 | ✅ EXCELLENT |
 
 ### Macro & Crypto (Dossier `data_macro_1min`)
 Utilisé pour donner du contexte de marché au modèle.
@@ -65,9 +66,9 @@ Utilisé pour donner du contexte de marché au modèle.
 ## 🎯 Target & Labelling (Triple Barrier)
 
 La variable cible (`Target`) n'est pas une simple direction, mais le résultat d'une course entre 3 barrières :
-* **Classe 0 (SELL)** : Le prix touche le Stop-Loss bas avant le Take-Profit haut.
+* **Classe 0 (SELL)** : Le prix touche le Stop-Loss bas avant le Take-Profit haut (-4 ATR).
 * **Classe 1 (WAIT)** : Le prix n'a touché aucune barrière après 30 minutes (manque de volatilité).
-* **Classe 2 (BUY)** : Le prix touche le Take-Profit haut avant le Stop-Loss bas.
+* **Classe 2 (BUY)** : Le prix touche le Take-Profit haut avant le Stop-Loss bas (+4 ATR).
 
 ### Analyse de Sensibilité (Choix du Seuil)
 Nous avons testé différents multiplicateurs d'ATR pour définir la largeur des barrières. L'objectif était d'obtenir une distribution équilibrée (~33% de WAIT).
@@ -85,34 +86,29 @@ Le seuil retenu est **4.0 ATR**. Cela nous permet d'avoir un dataset d'entraîne
 
 ## 🧠 Features Engineering
 
-Les features ont été sélectionnées pour maximiser la stationnarité (Log Returns, Distances aux Moyennes Mobiles, Volatilité Relative).
+Le modèle utilise désormais 87 indicateurs normalisés. L'analyse d'importance (Permutation) a révélé que les indicateurs classiques (RSI, SMA) sont surclassés par des métriques plus fines.
 
-**Importance des Features (V6) :**
-![Feature Importance](intraday/features_v6.png)
-*Le modèle privilégie les indicateurs de régime de marché (Choppiness Index) et de volatilité (BB Width) avant les indicateurs directionnels.*
+**Importance des Features (V7) :**
+![Feature Importance](intraday/features_v7.png)
 
 ---
 
-## 🏆 Résultats & Performances (Modèle V6.3)
+## 🏆 Résultats & Performances (Modèle V7)
 
 Le modèle a été évalué sur un jeu de test strict (post-Juin 2025), contenant **191 163 échantillons**.
 
 ### Métriques Globales
-* **Matthews Correlation Coefficient (MCC) : 0.1779** (Indique un avantage statistique réel).
-* **Accuracy Globale :** 45%
+* **Matthews Correlation Coefficient (MCC) : 0.1953** (Indique un avantage statistique réel).
+* **Accuracy Globale :** 47%
 
 ### Rapport Détaillé
 
 | Classe | Precision | Recall | F1-Score |
 | :--- | :--- | :--- | :--- |
-| **SELL (0)** | 0.38 | **0.16** | 0.23 |
-| **WAIT (1)** | 0.55 | 0.62 | 0.58 |
-| **BUY (2)** | 0.38 | **0.54** | 0.44 |
+| **SELL (0)** | 0.40 | **0.41** | 0.41 |
+| **WAIT (1)** | 0.52 | 0.77 | 0.62 |
+| **BUY (2)** | 0.42 | **0.16** | 0.23 |
 
-### Analyse
-* **Biais Haussier (Permabull) :** Le modèle est très à l'aise pour détecter les achats (Recall 54%), probablement dû à la tendance de fond du marché sur la période d'entraînement.
-* **Faiblesse Vendeuse :** Il peine à identifier les configurations de vente (Recall 16%), qu'il confond souvent avec du WAIT.
-* **Stabilité :** Le score MCC positif confirme que le modèle performe mieux que le hasard, mais nécessite un filtrage supplémentaire (Threshold Optimization) pour être déployé.
 
 ---
 
